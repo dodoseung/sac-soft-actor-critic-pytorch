@@ -28,6 +28,20 @@ class ReplayBuffer():
         states, actions, rewards, next_states, dones = map(np.stack, zip(*batch))
         return states, actions, rewards, next_states, dones
 
+class ValueNet(nn.Module):
+    def __init__(self, state_num):
+        super(ValueNet, self).__init__()
+        self.input = nn.Linear(state_num, 512)
+        self.fc = nn.Linear(512, 512)
+        self.output = nn.Linear(512, 1)
+        
+    def forward(self, x):
+        x = F.relu(self.input(x))
+        x = F.relu(self.fc(x))
+        value = self.output(x)
+        
+        return value
+
 class SoftQNet(nn.Module):
     def __init__(self, state_num, action_num):
         super(SoftQNet, self).__init__()
@@ -90,24 +104,28 @@ class PolicyNet(nn.Module):
         return actions, log_probs
     
 class SAC():
-    def __init__(self, env, memory_size=1000000, batch_size=64, gamma=0.95, learning_rate=1e-3, tau=0.01, alpha=1, reward_normalization=False, reward_scale=5):
+    def __init__(self, env, memory_size=1000000, batch_size=64, gamma=0.95, learning_rate=1e-3, tau=0.01, alpha=1, reward_normalization=False, reward_scale=1):
         super(SAC, self).__init__()
         self.env = env
         self.state_num = self.env.observation_space.shape[0]
         self.action_num = self.env.action_space.shape[0]
         self.action_max = float(env.action_space.high[0])
         self.action_min = float(env.action_space.low[0])
-                
+        
         # Torch
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Value
+        self.value_net = ValueNet(self.state_num).to(self.device)
+        self.value_opt = optim.Adam(self.value_net.parameters(), lr=learning_rate)
+        
+        # Value target
+        self.value_target_net = ValueNet(self.state_num).to(self.device)
+        self.value_target_net.load_state_dict(self.value_net.state_dict())
         
         # Soft Q
         self.soft_q_net = SoftQNet(self.state_num, self.action_num).to(self.device)
         self.soft_q_opt = optim.Adam(self.soft_q_net.parameters(), lr=learning_rate)
-        
-        # Soft Q Target
-        self.soft_q_target_net = SoftQNet(self.state_num, self.action_num).to(self.device)
-        self.soft_q_target_net.load_state_dict(self.soft_q_net.state_dict())
         
         # Policy
         self.policy_net = PolicyNet(self.state_num, self.action_min, self.action_max).to(self.device)
@@ -147,45 +165,52 @@ class SAC():
         rewards = torch.FloatTensor(rewards).to(self.device).view(-1, 1)
         next_states = torch.FloatTensor(next_states).to(self.device)
         dones = torch.FloatTensor(dones).to(self.device).view(-1, 1)
- 
+
         # Reward normalization and scailing
         rewards = self.reward_scale * (rewards - rewards.mean()) / rewards.std() if self.reward_normalization else rewards
         
-        # Get the new next action with the current policy
-        new_next_actions, next_log_probs = self.policy_net.sample(next_states)
-
-        # Get the target q value
-        next_q_value_1, next_q_value_2 = self.soft_q_target_net(next_states, new_next_actions)
-        next_q_values = torch.min(next_q_value_1, next_q_value_2)
-        target_q_values = rewards + self.gamma * (next_q_values - self.alpha * next_log_probs) * (1-dones)
-
-        # Calculate the q value loss and optimize the q value network
-        q_value_1, q_value_2 = self.soft_q_net(states, actions)
-        q_loss =  F.mse_loss(q_value_1, target_q_values.detach()) + F.mse_loss(q_value_2, target_q_values.detach())
-        self.soft_q_opt.zero_grad()
-        q_loss.backward()
-        self.soft_q_opt.step()
+        # Get the q values and target q values for the soft q network
+        q_values1, q_values2 = self.soft_q_net(states, actions)
+        next_state_values = self.value_target_net(next_states)
+        target_q_values = rewards + self.gamma * next_state_values * (1-dones)
         
-        # Get the new action with the current policy
+        # Get new action with the current policy
         new_actions, log_probs = self.policy_net.sample(states)
         
-        # Get the minimum q value
-        new_q_value_1, new_q_value_2 = self.soft_q_net(states, new_actions)
-        q_values = torch.min(new_q_value_1, new_q_value_2)
-
-        # Calculate the policy loss and optimize the policy network
-        policy_loss = (self.alpha * log_probs - q_values).mean()
+        # Get the target q values through clipped double q
+        new_q_values1, new_q_values2 = self.soft_q_net(states, new_actions)
+        new_q_values = torch.min(new_q_values1, new_q_values2)
+        
+        # Get the state values and target values for the value network
+        state_values = self.value_net(states)
+        target_values = new_q_values - self.alpha * log_probs
+        
+        # Calculate the loss
+        q_loss = F.mse_loss(q_values1, target_q_values.detach()) + F.mse_loss(q_values2, target_q_values.detach())
+        value_loss = F.mse_loss(state_values, target_values.detach())
+        policy_loss = (self.alpha * log_probs - new_q_values).mean()
+        
+        # Zero gradient
+        self.soft_q_opt.zero_grad()
+        self.value_opt.zero_grad()
         self.policy_opt.zero_grad()
+        
+        # Backward
+        q_loss.backward(retain_graph=True)
+        value_loss.backward(retain_graph=True)
         policy_loss.backward()
+        
+        # Optimization
+        self.soft_q_opt.step()
+        self.value_opt.step()
         self.policy_opt.step()
         
         # Soft update the value network
-        self.soft_update(self.soft_q_net, self.soft_q_target_net)
-
+        self.soft_update(self.value_net, self.value_target_net)
         
 def main():
     env = gym.make("Pendulum-v0")
-    agent = SAC(env, memory_size=1000000, batch_size=128, gamma=0.99, learning_rate=3e-4, tau=0.01, alpha=1, reward_normalization=True, reward_scale=10)
+    agent = SAC(env, memory_size=100000, batch_size=128, gamma=0.99, learning_rate=3e-4, tau=0.01, alpha=1, reward_normalization=True, reward_scale=10)
     ep_rewards = deque(maxlen=1)
     total_episode = 10000
     
@@ -198,8 +223,10 @@ def main():
             ep_reward += reward
 
             agent.replay_buffer.add(state, action, reward, next_state, done)
+            
             if i > 2:
                 agent.learn()
+        
             
             if done:
                 ep_rewards.append(ep_reward)
