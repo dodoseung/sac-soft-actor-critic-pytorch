@@ -31,13 +31,11 @@ class ReplayBuffer():
 class ValueNet(nn.Module):
     def __init__(self, state_num):
         super(ValueNet, self).__init__()
-        # Value network
         self.input = nn.Linear(state_num, 512)
         self.fc = nn.Linear(512, 512)
         self.output = nn.Linear(512, 1)
         
     def forward(self, x):
-        # Value network
         x = F.relu(self.input(x))
         x = F.relu(self.fc(x))
         value = self.output(x)
@@ -92,8 +90,7 @@ class PolicyNet(nn.Module):
         x = F.relu(self.fc3(x))
         mu = (self.max_action - self.min_action) * F.sigmoid(self.mu(x)) + self.min_action
         std = (self.max_action - self.min_action) * F.sigmoid(self.std(x)) / 2
-        # mu = self.mu(x)
-        # mu = mu.clamp(min=self.min_action, max=self.max_action)
+        # mu = self.mu(x).clamp(min=self.min_action, max=self.max_action)
         # std = F.softplus(self.std(x)) # eliminate nagative value
 
         return mu, std
