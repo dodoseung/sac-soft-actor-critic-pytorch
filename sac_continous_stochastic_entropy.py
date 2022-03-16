@@ -88,7 +88,7 @@ class PolicyNet(nn.Module):
         return actions, log_probs
     
 class SAC():
-    def __init__(self, env, memory_size=1000000, batch_size=64, gamma=0.95, learning_rate=1e-3, tau=0.01, min_alpha = -1, reward_normalization=False, reward_scale=5):
+    def __init__(self, env, memory_size=1000000, batch_size=64, gamma=0.95, learning_rate=1e-3, tau=0.01, target_alpha=-1, reward_normalization=False, reward_scale=5):
         super(SAC, self).__init__()
         self.env = env
         self.state_num = self.env.observation_space.shape[0]
@@ -114,7 +114,7 @@ class SAC():
         # Temperature parameter alpha
         self.alpha = torch.ones(1, dtype=torch.float32, requires_grad=True, device=self.device)
         self.alpha_opt = optim.Adam([self.alpha], lr=learning_rate)
-        self.min_alpha = min_alpha
+        self.target_alpha = target_alpha
         
         # Replay buffer
         self.replay_buffer = ReplayBuffer(memory_size)
@@ -182,7 +182,7 @@ class SAC():
         self.policy_opt.step()
         
         # Automating Entropy Adjustment for Maximum Entropy 
-        alpha_loss = (-self.alpha * log_probs.detach() - self.alpha * self.min_alpha).mean()
+        alpha_loss = (-self.alpha * log_probs.detach() - self.alpha * self.target_alpha).mean()
         self.alpha_opt.zero_grad()
         alpha_loss.backward()
         self.alpha_opt.step()
@@ -193,7 +193,7 @@ class SAC():
         
 def main():
     env = gym.make("Pendulum-v0")
-    agent = SAC(env, memory_size=1000000, batch_size=128, gamma=0.99, learning_rate=3e-4, tau=0.01, min_alpha=-1, reward_normalization=True, reward_scale=10)
+    agent = SAC(env, memory_size=1000000, batch_size=128, gamma=0.99, learning_rate=3e-4, tau=0.01, target_alpha=-1, reward_normalization=True, reward_scale=10)
     ep_rewards = deque(maxlen=1)
     total_episode = 10000
     
