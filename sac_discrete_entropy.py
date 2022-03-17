@@ -4,7 +4,6 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributions as D
 
 import numpy as np
 import gym
@@ -91,7 +90,7 @@ class SAC():
         # Temperature parameter alpha
         self.alpha = torch.ones(1, dtype=torch.float32, requires_grad=True, device=self.device)
         self.alpha_opt = optim.Adam([self.alpha], lr=learning_rate)
-        self.target_alpha = -np.log(1.0 / self.action_num)
+        self.target_alpha = - np.log(1.0 / self.action_num)
         
         # Replay buffer
         self.replay_buffer = ReplayBuffer(memory_size)
@@ -137,8 +136,7 @@ class SAC():
         next_q_value_1, next_q_value_2 = self.soft_q_target_net(next_states)
         next_q_values = torch.min(next_q_value_1, next_q_value_2)
         next_values = next_policies * (next_q_values - self.alpha * next_log_policies)
-        next_values = next_values.mean(dim=-1, keepdim=True)
-        # next_values = next_values.sum(dim=1, keepdim=True)
+        next_values = next_values.sum(dim=1, keepdim=True)
         target_q_values = rewards + self.gamma * next_values * (1-dones)
 
         # Get the current q values
@@ -179,7 +177,7 @@ class SAC():
         
 def main():
     env = gym.make("CartPole-v0")
-    agent = SAC(env, memory_size=1000000, batch_size=128, gamma=0.99, learning_rate=1e-6, tau=0.01, reward_normalization=False, reward_scale=10)
+    agent = SAC(env, memory_size=1000000, batch_size=128, gamma=0.99, learning_rate=1e-4, tau=0.01, reward_normalization=False, reward_scale=10)
     ep_rewards = deque(maxlen=1)
     total_episode = 10000
     
