@@ -142,7 +142,7 @@ class SAC():
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
     
     def learn(self):
-        # Get memory from rollout
+        # Get memory from replay buffer
         states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
         states = torch.FloatTensor(states).to(self.device)
         actions = torch.FloatTensor(actions).to(self.device)

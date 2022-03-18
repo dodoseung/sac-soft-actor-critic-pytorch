@@ -17,14 +17,14 @@ class ReplayBuffer():
         self.memory = deque(maxlen=self.max_size)
         
     # Add the replay memory
-    def add(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
+    def add(self, state, action, reward, next_state, done, last_action, hidden_in, hidden_out):
+        self.memory.append((state, action, reward, next_state, done, last_action, hidden_in, hidden_out))
 
     # Sample the replay memory
     def sample(self, batch_size):
         batch = random.sample(self.memory, min(batch_size, len(self.memory)))
-        states, actions, rewards, next_states, dones = map(np.stack, zip(*batch))
-        return states, actions, rewards, next_states, dones
+        states, actions, rewards, next_states, dones, last_action, hidden_in, hidden_out = map(np.stack, zip(*batch))
+        return states, actions, rewards, next_states, dones, last_action, hidden_in, hidden_out
 
 class SoftQNet(nn.Module):
     def __init__(self, state_num, action_num):
@@ -44,17 +44,18 @@ class SoftQNet(nn.Module):
         self.output2 = nn.Linear(512, 1)
         
     def forward(self, x, u, last_u, hidden):
-        x = x.permute(1,0,2)
-        u = u.permute(1,0,2)
-        last_u = last_u.permute(1,0,2)
+        # x = x.permute(1,0,2)
+        # u = u.permute(1,0,2)
+        # last_u = last_u.permute(1,0,2)
         
         # Network 1
         # FC1
-        x1 = F.relu(self.input1(x))
+        x1 = torch.cat([x, u], 1) 
+        x1 = F.relu(self.input1(x1))
         # LSTM
         x2 = torch.cat([x, last_u], 1)
         x2 = F.relu(self.fc1(x2))
-        x2, hidden1 = self.lstm1(x2, hidden)
+        x2, _ = self.lstm1(x2, hidden)
         # FC2
         x3 = torch.cat([x1, x2], 1) 
         x3 = F.relu(self.fc2(x3))
@@ -63,18 +64,19 @@ class SoftQNet(nn.Module):
         
         # Network 2
         # FC1
-        x1 = F.relu(self.input2(x))
+        x1 = torch.cat([x, u], 1) 
+        x1 = F.relu(self.input2(x1))
         # LSTM
         x2 = torch.cat([x, last_u], 1)
         x2 = F.relu(self.fc3(x2))
-        x2, hidden2 = self.lstm2(x2, hidden)
+        x2, _ = self.lstm2(x2, hidden)
         # FC2
         x3 = torch.cat([x1, x2], 1) 
         x3 = F.relu(self.fc4(x3))
         value2 = F.relu(self.output2(x3))
         value2 = value2.permute(1,0,2)
         
-        return value1, hidden1, value2, hidden2
+        return value1, value2
 
 class PolicyNet(nn.Module):
     def __init__(self, state_num, action_num, min_action, max_action):
@@ -92,8 +94,8 @@ class PolicyNet(nn.Module):
         self.std = nn.Linear(512, 1)
         
     def forward(self, x, last_u, hidden):
-        x = x.permute(1,0,2)
-        last_u = last_u.permute(1,0,2)
+        # x = x.permute(1,0,2)
+        # last_u = last_u.permute(1,0,2)
         
         # FC1
         x1 = F.relu(self.input(x))
@@ -116,8 +118,8 @@ class PolicyNet(nn.Module):
         return mu, std, hidden
     
     # Enforcing action bounds
-    def sample(self, states, epsilon=1e-6):
-        mu, std = self.forward(states)
+    def sample(self, states, last_u, hidden, epsilon=1e-6):
+        mu, std = self.forward(states, last_u, hidden)
         dist = D.Normal(mu, std)
         actions = dist.rsample()
         log_probs = dist.log_prob(actions) - torch.log(1. - torch.tanh(actions).pow(2) + epsilon)
@@ -165,12 +167,13 @@ class SAC():
         self.reward_scale = reward_scale
         
     # Get the action
-    def get_action(self, state):
+    def get_action(self, state, last_action, hidden_in):
         state = torch.FloatTensor(state).to(self.device).unsqueeze(0)
-        mu, std = self.policy_net(state)
+        last_action = torch.FloatTensor(last_action).to(self.device).unsqueeze(0)
+        mu, std, hidden_out = self.policy_net(state, last_action, hidden_in)
         action = D.Normal(mu, std).sample()
         action = action.cpu().detach().numpy()
-        return action[0]
+        return action[0], hidden_out
 
     # Soft update a target network
     def soft_update(self, net, target_net):
@@ -178,37 +181,40 @@ class SAC():
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
     
     def learn(self):
-        # Get memory from rollout
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
+        # Get memory from replay buffer
+        states, actions, rewards, next_states, dones, last_action, hidden_in, hidden_out = self.replay_buffer.sample(self.batch_size)
         states = torch.FloatTensor(states).to(self.device)
         actions = torch.FloatTensor(actions).to(self.device)
         rewards = torch.FloatTensor(rewards).to(self.device).view(-1, 1)
         next_states = torch.FloatTensor(next_states).to(self.device)
         dones = torch.FloatTensor(dones).to(self.device).view(-1, 1)
+        last_actions = torch.FloatTensor(last_action).to(self.device)
+        hidden_in = torch.FloatTensor(hidden_in).to(self.device)
+        hidden_out = torch.FloatTensor(hidden_out).to(self.device)
  
         # Reward normalization and scailing
         rewards = self.reward_scale * (rewards - rewards.mean()) / rewards.std() if self.reward_normalization else rewards
         
         # Get the new next action with the current policy
-        new_next_actions, next_log_probs = self.policy_net.sample(next_states)
+        new_next_actions, next_log_probs = self.policy_net.sample(next_states, actions, hidden_out)
 
         # Get the target q value
-        next_q_value_1, next_q_value_2 = self.soft_q_target_net(next_states, new_next_actions)
+        next_q_value_1, next_q_value_2 = self.soft_q_target_net(next_states, new_next_actions, actions, hidden_out)
         next_q_values = torch.min(next_q_value_1, next_q_value_2)
         target_q_values = rewards + self.gamma * (next_q_values - self.alpha * next_log_probs) * (1-dones)
 
         # Calculate the q value loss and optimize the q value network
-        q_value_1, q_value_2 = self.soft_q_net(states, actions)
+        q_value_1, q_value_2 = self.soft_q_net(states, actions, last_actions, hidden_in)
         q_loss =  F.mse_loss(q_value_1, target_q_values.detach()) + F.mse_loss(q_value_2, target_q_values.detach())
         self.soft_q_opt.zero_grad()
         q_loss.backward()
         self.soft_q_opt.step()
         
         # Get the new action with the current policy
-        new_actions, log_probs = self.policy_net.sample(states)
+        new_actions, log_probs = self.policy_net.sample(states, last_actions, hidden_in)
         
         # Get the minimum q value
-        new_q_value_1, new_q_value_2 = self.soft_q_net(states, new_actions)
+        new_q_value_1, new_q_value_2 = self.soft_q_net(states, new_actions, last_actions, hidden_in)
         q_values = torch.min(new_q_value_1, new_q_value_2)
 
         # Calculate the policy loss and optimize the policy network
@@ -229,19 +235,23 @@ class SAC():
         
 def main():
     env = gym.make("Pendulum-v0")
-    agent = SAC(env, memory_size=1000000, batch_size=128, gamma=0.99, learning_rate=3e-4, tau=0.01, target_entropy=-1, reward_normalization=True, reward_scale=10)
+    agent = SAC(env, memory_size=1000000, batch_size=128, gamma=0.99, learning_rate=3e-4, tau=0.01, target_entropy=-1, reward_normalization=False, reward_scale=10)
     ep_rewards = deque(maxlen=1)
     total_episode = 10000
-    
+
     for i in range(total_episode):
         state = env.reset()
+        last_action = env.action_space.sample()
+        hidden_out = (torch.zeros([1, 1, 512], dtype=torch.float32, device=agent.device), torch.zeros([1, 1, 512], dtype=torch.float32, device=agent.device))
+        hidden_in = hidden_out
+        
         ep_reward = 0
         while True:
-            action = agent.get_action(state)
+            action, hidden_out = agent.get_action(state, last_action, hidden_in)
             next_state, reward , done, _ = env.step(action)
             ep_reward += reward
 
-            agent.replay_buffer.add(state, action, reward, next_state, done)
+            agent.replay_buffer.add(state, action, reward, next_state, done, last_action, hidden_in, hidden_out)
             if i > 2:
                 agent.learn()
             
@@ -252,6 +262,8 @@ def main():
                 break
 
             state = next_state
+            last_action = action
+            hidden_in = hidden_out
 
 if __name__ == '__main__':
     main()
