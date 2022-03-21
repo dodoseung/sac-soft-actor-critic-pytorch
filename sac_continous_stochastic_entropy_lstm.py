@@ -9,6 +9,7 @@ import numpy as np
 import gym
 import random
 from collections import deque
+from reacher import Reacher
 
 class ReplayBuffer():
     def __init__(self, max_size=100000):
@@ -44,9 +45,9 @@ class SoftQNet(nn.Module):
         self.output2 = nn.Linear(512, 1)
         
     def forward(self, x, u, last_u, hidden):
-        # x = x.permute(1,0,2)
-        # u = u.permute(1,0,2)
-        # last_u = last_u.permute(1,0,2)
+        x = x.permute(1,0,2)
+        u = u.permute(1,0,2)
+        last_u = last_u.permute(1,0,2)
         
         # Network 1
         # FC1
@@ -94,8 +95,8 @@ class PolicyNet(nn.Module):
         self.std = nn.Linear(512, 1)
         
     def forward(self, x, last_u, hidden):
-        # x = x.permute(1,0,2)
-        # last_u = last_u.permute(1,0,2)
+        x = x.permute(1,0,2)
+        last_u = last_u.permute(1,0,2)
         
         # FC1
         x1 = F.relu(self.input(x))
@@ -234,13 +235,25 @@ class SAC():
 
         
 def main():
-    env = gym.make("Pendulum-v0")
+    ENV = 'Reacher'
+    NUM_JOINTS=2
+    LINK_LENGTH=[200, 140]
+    INI_JOING_ANGLES=[0.1, 0.1]
+    SCREEN_SIZE=1000
+    SPARSE_REWARD=False
+    SCREEN_SHOT=False
+
+    env=Reacher(screen_size=SCREEN_SIZE, num_joints=NUM_JOINTS, link_lengths = LINK_LENGTH, \
+    ini_joint_angles=INI_JOING_ANGLES, target_pos = [369,430], render=True, change_goal=False)
+    action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(env.num_actions,), dtype=np.float32)
+    state_space  = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(env.num_observations, ))
+
     agent = SAC(env, memory_size=1000000, batch_size=128, gamma=0.99, learning_rate=3e-4, tau=0.01, target_entropy=-1, reward_normalization=False, reward_scale=10)
     ep_rewards = deque(maxlen=1)
     total_episode = 10000
 
     for i in range(total_episode):
-        state = env.reset()
+        state = env.reset(SCREEN_SHOT)
         last_action = env.action_space.sample()
         hidden_out = (torch.zeros([1, 1, 512], dtype=torch.float32, device=agent.device), torch.zeros([1, 1, 512], dtype=torch.float32, device=agent.device))
         hidden_in = hidden_out
@@ -248,7 +261,7 @@ def main():
         ep_reward = 0
         while True:
             action, hidden_out = agent.get_action(state, last_action, hidden_in)
-            next_state, reward , done, _ = env.step(action)
+            next_state, reward , done, _ = env.step(action, SPARSE_REWARD, SCREEN_SHOT)
             ep_reward += reward
 
             agent.replay_buffer.add(state, action, reward, next_state, done, last_action, hidden_in, hidden_out)
